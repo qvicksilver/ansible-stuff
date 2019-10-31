@@ -1,0 +1,60 @@
+---
+- hosts: vms
+  gather_facts: false
+  vars:
+    cloud_init_files:
+      - meta-data
+      - network-config
+      - user-data
+    image_base: "{{ hostvars[hypervisor]['image_base'] | default('/var/lib/libvirt/images') }}"
+    images:
+      ubuntu_1804: ubuntu-18.04-minimal-cloudimg-amd64.img
+  tasks:
+    - name: Provision VM
+      block:
+        - name: Create temporary directory
+          file:
+            path: "/tmp/{{ inventory_hostname }}"
+            state: directory
+        - name: Render cloud-init templates
+          template:
+            src: "{{ item }}.j2"
+            dest: "/tmp/{{ inventory_hostname }}/{{ item }}"
+          with_items: "{{ cloud_init_files }}"
+        - name: Create cloud-init iso-image
+          shell: "genisoimage -output cidata.iso -volid cidata -joliet -r {{ cloud_init_files | join(' ') }}"
+          args:
+            chdir: "/tmp/{{ inventory_hostname }}"
+        - name: Create directory for VM storage
+          file:
+            path: "{{ image_base }}/{{ inventory_hostname }}"
+            state: directory
+        - name: Copy image in place
+          copy:
+            src: "{{ source_image | default(images[os]) }}"
+            dest: "{{ image_base }}/{{ inventory_hostname }}/root.qcow2"
+            remote_src: true
+        - name: Resize image
+          shell: "qemu-img resize {{ image_base }}/{{ inventory_hostname }}/root.qcow2 {{ disk_size }}"
+          when: disk_size is defined
+        - name: Install VM
+          shell: "virt-install --import --name {{ inventory_hostname }} --ram {{ memory | default('2048') }} --disk {{ image_base }}/{{ inventory_hostname }}/root.qcow2 --disk /tmp/{{ inventory_hostname }}/cidata.iso,device=cdrom --vcpus {{ cpu | default(1) }} --os-type linux --os-variant rhel7 --network {% if network == 'direct' %}type=direct,source={{ source_if | default(hostvars[hypervisor]['source_if']) }},source_mode=bridge{% endif %} {% if network == 'bridge' %} bridge={{ bridge | default(hostvars[hypervisor]['default_bridge']) }} {% endif %} {% if network == 'network' %} network={{ network | default('default') }} {% endif %} --graphics none --console pty,target_type=serial --noautoconsole"
+        - name: Eject cloud-init iso
+          shell: "virsh change-media {{ inventory_hostname }} hda --eject --config"
+
+      rescue:
+        - name: Delete VM storage
+          file:
+            path: "{{ image_base }}/{{ inventory_hostname }}"
+            state: absent
+          when: ansible_failed_task.name == "Copy image in place" or ansible_failed_task.name == "Resize image"
+        - name: Delete VM
+          shell: "virsh destroy {{ inventory_hostname }}; virsh undefine {{ inventory_hostname }}"
+          when: ansible_failed_task.name == "Install VM"
+
+      always:
+        - name: Clean up temporary files
+          file:
+            path: "/tmp/{{ inventory_hostname }}"
+            state: absent
+      delegate_to: "{{ hypervisor }}"

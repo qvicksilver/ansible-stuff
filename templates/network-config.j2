@@ -1,0 +1,16 @@
+version: 2
+ethernets:
+  ens3:
+    {% if dhcp4 is defined -%}
+    dhcp4: {{ dhcp4 }}
+    {% endif -%}
+    {% if addresses is defined -%}
+    addresses:
+    {% for address in addresses -%}
+      - {{ address }}
+    {% endfor -%}
+    gateway4: {{ gateway4 | default("192.168.1.1") }}
+    nameservers:
+      search: [{% for domain in search_domains %}{{ domain }}{% if not loop.last %},{% endif %}{% endfor %}]
+      addresses: [{% for nameserver in nameservers %}{{ nameserver }}{% if not loop.last %},{% endif %}{% endfor %}]
+    {% endif -%}
