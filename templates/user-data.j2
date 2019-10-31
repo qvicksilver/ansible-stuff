@@ -12,16 +12,21 @@ ntp:
     - se.pool.ntp.org
   enabled: true
 
+{% if nameservers is defined or search_domains is defined %}
 manage_resolv_conf: true
 resolv_conf:
-  nameservers:
-  {% for nameserver in nameservers -%}
-    - {{ nameserver }}
-  {% endfor -%}
+{% else %}
+manage_resolv_conf: false
+{% endif %}
+{% if nameservers is defined -%}
+  nameservers: [{% for nameserver in nameservers -%}'{{ nameserver }}'{% if not loop.last %},{% endif %}{% endfor %}]
+{% endif -%}
+{% if search_domains is defined -%}
   searchdomains:
-  {% for domain in search_domains -%}
+  {% for search_domain in search_domains -%}
     - sofiero.net
   {% endfor -%}
+{% endif -%}
 
 # Remove cloud-init when finished with it
 #runcmd:

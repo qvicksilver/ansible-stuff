@@ -9,6 +9,7 @@
     image_base: "{{ hostvars[hypervisor]['image_base'] | default('/var/lib/libvirt/images') }}"
     images:
       ubuntu_1804: ubuntu-18.04-minimal-cloudimg-amd64.img
+    storage: ""
   tasks:
     - name: Provision VM
       block:
@@ -29,21 +30,33 @@
           file:
             path: "{{ image_base }}/{{ inventory_hostname }}"
             state: directory
+          when: storage != "lvm" or disk_size is defined
         - name: Copy image in place
           copy:
-            src: "{{ source_image | default(images[os]) }}"
+            src: "{{ source_image | default(image_base + '/' + images[os]) }}"
             dest: "{{ image_base }}/{{ inventory_hostname }}/root.qcow2"
             remote_src: true
+          when: storage != "lvm" or disk_size is defined
+          register: copy_image
+        - name: Set vm_image
+          set_fact:
+            vm_image: "{% if copy_image is skipped %}{{ source_image | default(image_base + '/' + images[os]) }}{% else %}{{ image_base }}/{{ inventory_hostname }}/root.qcow2{% endif %}"
         - name: Resize image
-          shell: "qemu-img resize {{ image_base }}/{{ inventory_hostname }}/root.qcow2 {{ disk_size }}"
+          shell: "qemu-img resize {{ vm_image }} {{ disk_size }}"
           when: disk_size is defined
+        - name: Create volume
+          shell: "virsh vol-create-as {{ pool | default(hostvars[hypervisor]['default_pool']) }} {{ inventory_hostname }} $(qemu-img info {{ vm_image }} | perl -n -e'/virtual size.*\\((\\d+)/ && print $1')"
+          when: storage == "lvm"
+        - name: Write image to volume
+          shell: "qemu-img convert -O raw {{ vm_image }} /dev/{{ vg | default(hostvars[hypervisor]['default_vg']) }}/{{ inventory_hostname }}"
+          when: storage == "lvm"
         - name: Install VM
-          shell: "virt-install --import --name {{ inventory_hostname }} --ram {{ memory | default('2048') }} --disk {{ image_base }}/{{ inventory_hostname }}/root.qcow2 --disk /tmp/{{ inventory_hostname }}/cidata.iso,device=cdrom --vcpus {{ cpu | default(1) }} --os-type linux --os-variant rhel7 --network {% if network == 'direct' %}type=direct,source={{ source_if | default(hostvars[hypervisor]['source_if']) }},source_mode=bridge{% endif %} {% if network == 'bridge' %} bridge={{ bridge | default(hostvars[hypervisor]['default_bridge']) }} {% endif %} {% if network == 'network' %} network={{ network | default('default') }} {% endif %} --graphics none --console pty,target_type=serial --noautoconsole"
+          shell: "virt-install --import --name {{ inventory_hostname }} --ram {{ memory | default('2048') }} --disk {% if storage == 'lvm' %}vol={{ pool | default(hostvars[hypervisor]['default_pool']) }}/{{ inventory_hostname }} {% else %}{{ vm_image }} {% endif %}--disk /tmp/{{ inventory_hostname }}/cidata.iso,device=cdrom --vcpus {{ cpu | default(1) }} --os-type linux --os-variant rhel7 --network {% if network == 'direct' %}type=direct,source={{ source_if | default(hostvars[hypervisor]['source_if']) }},source_mode=bridge{% endif %} {% if network == 'bridge' %} bridge={{ bridge | default(hostvars[hypervisor]['default_bridge']) }} {% endif %} {% if network == 'network' %} network={{ network | default('default') }} {% endif %} --graphics none --console pty,target_type=serial --noautoconsole"
         - name: Eject cloud-init iso
           shell: "virsh change-media {{ inventory_hostname }} hda --eject --config"
 
       rescue:
-        - name: Delete VM storage
+        - name: Delete image
           file:
             path: "{{ image_base }}/{{ inventory_hostname }}"
             state: absent
@@ -51,10 +64,14 @@
         - name: Delete VM
           shell: "virsh destroy {{ inventory_hostname }}; virsh undefine {{ inventory_hostname }}"
           when: ansible_failed_task.name == "Install VM"
+        - name: Delete LV
+          shell: "vol-delete --pool {{ pool | default(hostvars[hypervisor]['default_pool']) }} {{ inventory_hostname }}"
 
       always:
         - name: Clean up temporary files
           file:
             path: "/tmp/{{ inventory_hostname }}"
             state: absent
+        - name: Remove iso pool
+          shell: "virsh pool-destroy {{ inventory_hostname }} ; virsh pool-delete {{ inventory_hostname }} ; virsh pool-undefine {{ inventory_hostname }}"
       delegate_to: "{{ hypervisor }}"
